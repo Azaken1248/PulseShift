@@ -28,7 +28,7 @@ public class NoteManager : MonoBehaviour
 
     public void AddActiveNote(Transform noteTransform, GameNote noteData)
     {
-        if (noteTransform == null || ActiveNoteTransforms == null || ActiveNoteData == null)
+        if (ActiveNoteTransforms == null || ActiveNoteData == null)
         {
             return;
         }
@@ -100,7 +100,15 @@ public class NoteManager : MonoBehaviour
 
             GameNote note = activeNoteData[i];
 
-            double timeRemaining = note.Timestamp - currentSongTime;
+            // SlideEnd may carry the slider visual (transferred from SlideStart).
+            // Anchor it to the hold's start time so the ribbon bottom scrolls correctly.
+            double anchorTime = note.Timestamp;
+            if (note.Type == NoteType.SlideEnd)
+            {
+                anchorTime = note.Timestamp - note.Duration;
+            }
+
+            double timeRemaining = anchorTime - currentSongTime;
 
             float yPosition = (float)(timeRemaining * ScrollSpeed);
             if (timeRemaining == 0d)
