@@ -1,25 +1,46 @@
-using System.Globalization;
 using System.IO;
 using UnityEngine;
 
 public static class BeatmapParser
 {
     private const double DefaultApproachTime = 1.5d;
+    private const int HoldTickIntervalMilliseconds = 100;
 
-    public static ConvertedMapData Parse(string osuText)
+    private struct ParsedHitObject
     {
-        if (string.IsNullOrEmpty(osuText)) return CreateEmptyMap();
+        public int X;
+        public int StartTimeMilliseconds;
+        public int EndTimeMilliseconds;
+        public bool IsTap;
+        public bool IsHold;
+    }
 
-        int tapCount = CountTapCircles(osuText);
-        
-        if (tapCount == 0)
+    public static ConvertedMapData Parse(TextAsset osuFile)
+    {
+        if (osuFile == null)
         {
-            Debug.LogWarning("BeatmapParser WARNING: Still found 0 notes. Check the DummyBeatmap string formatting in your Bootstrapper!");
             return CreateEmptyMap();
         }
 
-        GameNote[] notes = new GameNote[tapCount];
+        return Parse(osuFile.text);
+    }
+
+    public static ConvertedMapData Parse(string osuText)
+    {
+        if (string.IsNullOrEmpty(osuText))
+        {
+            return CreateEmptyMap();
+        }
+
+        int totalNotes = CountConvertedNotes(osuText);
+        if (totalNotes <= 0)
+        {
+            return CreateEmptyMap();
+        }
+
+        GameNote[] notes = new GameNote[totalNotes];
         int writeIndex = 0;
+        int slideId = 0;
         bool inHitObjects = false;
 
         using (StringReader reader = new StringReader(osuText))
@@ -27,24 +48,71 @@ public static class BeatmapParser
             string line;
             while ((line = reader.ReadLine()) != null)
             {
-                line = line.Trim(); 
-                
-                if (line.Length == 0) continue;
+                line = line.Trim();
 
-                if (line[0] == '[')
+                if (line.Length == 0)
                 {
-                    if (line == "[HitObjects]") inHitObjects = true;
-                    else if (inHitObjects) break; 
                     continue;
                 }
 
-                if (!inHitObjects) continue;
-
-                if (TryParseTapCircle(line, out GameNote note))
+                if (line[0] == '[')
                 {
-                    notes[writeIndex] = note;
-                    writeIndex++;
+                    if (line == "[HitObjects]")
+                    {
+                        inHitObjects = true;
+                    }
+                    else if (inHitObjects)
+                    {
+                        break;
+                    }
+
+                    continue;
                 }
+
+                if (!inHitObjects)
+                {
+                    continue;
+                }
+
+                ParsedHitObject parsedHitObject;
+                if (!TryParseHitObject(line, out parsedHitObject))
+                {
+                    continue;
+                }
+
+                if (parsedHitObject.IsTap)
+                {
+                    notes[writeIndex] = CreateNote(parsedHitObject.X, parsedHitObject.StartTimeMilliseconds, NoteType.Tap, -1, 0d);
+                    writeIndex++;
+                    continue;
+                }
+
+                if (!parsedHitObject.IsHold)
+                {
+                    continue;
+                }
+
+                double durationSeconds = (parsedHitObject.EndTimeMilliseconds - parsedHitObject.StartTimeMilliseconds) * 0.001d;
+                if (durationSeconds < 0d)
+                {
+                    durationSeconds = 0d;
+                }
+
+                notes[writeIndex] = CreateNote(parsedHitObject.X, parsedHitObject.StartTimeMilliseconds, NoteType.SlideStart, slideId, durationSeconds);
+                writeIndex++;
+
+                int tickTimeMilliseconds = parsedHitObject.StartTimeMilliseconds + HoldTickIntervalMilliseconds;
+                while (tickTimeMilliseconds < parsedHitObject.EndTimeMilliseconds)
+                {
+                    notes[writeIndex] = CreateNote(parsedHitObject.X, tickTimeMilliseconds, NoteType.SlideTick, slideId, durationSeconds);
+                    writeIndex++;
+                    tickTimeMilliseconds += HoldTickIntervalMilliseconds;
+                }
+
+                notes[writeIndex] = CreateNote(parsedHitObject.X, parsedHitObject.EndTimeMilliseconds, NoteType.SlideEnd, slideId, durationSeconds);
+                writeIndex++;
+
+                slideId++;
             }
         }
 
@@ -58,10 +126,15 @@ public static class BeatmapParser
 
     private static ConvertedMapData CreateEmptyMap()
     {
-        return new ConvertedMapData { Notes = new GameNote[0], TotalNotes = 0, ApproachTime = DefaultApproachTime };
+        return new ConvertedMapData
+        {
+            Notes = new GameNote[0],
+            TotalNotes = 0,
+            ApproachTime = DefaultApproachTime
+        };
     }
 
-    private static int CountTapCircles(string osuText)
+    private static int CountConvertedNotes(string osuText)
     {
         int count = 0;
         bool inHitObjects = false;
@@ -71,47 +144,137 @@ public static class BeatmapParser
             string line;
             while ((line = reader.ReadLine()) != null)
             {
-                line = line.Trim(); 
-                
-                if (line.Length == 0) continue;
+                line = line.Trim();
 
-                if (line[0] == '[')
+                if (line.Length == 0)
                 {
-                    if (line == "[HitObjects]") inHitObjects = true;
-                    else if (inHitObjects) break;
                     continue;
                 }
 
-                if (!inHitObjects) continue;
+                if (line[0] == '[')
+                {
+                    if (line == "[HitObjects]")
+                    {
+                        inHitObjects = true;
+                    }
+                    else if (inHitObjects)
+                    {
+                        break;
+                    }
 
-                if (TryParseTapCircle(line, out _))
+                    continue;
+                }
+
+                if (!inHitObjects)
+                {
+                    continue;
+                }
+
+                ParsedHitObject parsedHitObject;
+                if (!TryParseHitObject(line, out parsedHitObject))
+                {
+                    continue;
+                }
+
+                if (parsedHitObject.IsTap)
                 {
                     count++;
+                    continue;
+                }
+
+                if (!parsedHitObject.IsHold)
+                {
+                    continue;
+                }
+
+                count += 2;
+
+                int tickTimeMilliseconds = parsedHitObject.StartTimeMilliseconds + HoldTickIntervalMilliseconds;
+                while (tickTimeMilliseconds < parsedHitObject.EndTimeMilliseconds)
+                {
+                    count++;
+                    tickTimeMilliseconds += HoldTickIntervalMilliseconds;
                 }
             }
         }
+
         return count;
     }
 
-    private static bool TryParseTapCircle(string line, out GameNote note)
+    private static bool TryParseHitObject(string line, out ParsedHitObject parsedHitObject)
     {
-        note = new GameNote();
+        parsedHitObject = new ParsedHitObject();
+
         string[] parts = line.Split(',');
-        
-        if (parts.Length < 5) return false;
+        if (parts.Length < 5)
+        {
+            return false;
+        }
 
-        if (!int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int x)) return false;
-        if (!int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out int timeMilliseconds)) return false;
-        if (!int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out int typeValue)) return false;
+        int x;
+        int startTimeMilliseconds;
+        int typeValue;
 
-        if ((typeValue & 1) == 0) return false;
+        if (!int.TryParse(parts[0], out x))
+        {
+            return false;
+        }
 
-        note.Timestamp = timeMilliseconds * 0.001d;
-        note.LaneIndex = MappingConverter.GetLaneIndex(x);
-        note.Type = NoteType.Tap;
-        note.SlideId = -1;
-        note.SlideTargetX = x;
+        if (!int.TryParse(parts[2], out startTimeMilliseconds))
+        {
+            return false;
+        }
+
+        if (!int.TryParse(parts[3], out typeValue))
+        {
+            return false;
+        }
+
+        parsedHitObject.X = x;
+        parsedHitObject.StartTimeMilliseconds = startTimeMilliseconds;
+        parsedHitObject.IsHold = (typeValue & 128) != 0;
+        parsedHitObject.IsTap = !parsedHitObject.IsHold && (typeValue & 1) != 0;
+
+        if (!parsedHitObject.IsTap && !parsedHitObject.IsHold)
+        {
+            return false;
+        }
+
+        if (parsedHitObject.IsHold)
+        {
+            if (parts.Length < 6)
+            {
+                return false;
+            }
+
+            int colonIndex = parts[5].IndexOf(':');
+            string endTimeText = colonIndex >= 0 ? parts[5].Substring(0, colonIndex) : parts[5];
+
+            int endTimeMilliseconds;
+            if (!int.TryParse(endTimeText, out endTimeMilliseconds))
+            {
+                return false;
+            }
+
+            parsedHitObject.EndTimeMilliseconds = endTimeMilliseconds;
+        }
+        else
+        {
+            parsedHitObject.EndTimeMilliseconds = startTimeMilliseconds;
+        }
 
         return true;
+    }
+
+    private static GameNote CreateNote(int x, int timeMilliseconds, NoteType noteType, int slideId, double durationSeconds)
+    {
+        GameNote note = new GameNote();
+        note.Timestamp = timeMilliseconds * 0.001d;
+        note.LaneIndex = MappingConverter.GetLaneIndex(x);
+        note.Type = noteType;
+        note.SlideId = slideId;
+        note.SlideTargetX = x;
+        note.Duration = durationSeconds;
+        return note;
     }
 }
