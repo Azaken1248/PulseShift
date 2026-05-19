@@ -17,6 +17,7 @@ public struct GameNote
     public NoteType Type;
     public int SlideId;
     public float SlideTargetX;
+    public double Duration;
 }
 
 public class ConvertedMapData
